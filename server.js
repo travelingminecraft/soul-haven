@@ -2,16 +2,16 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { STATUS, ENEMIES, RELICS, TOTAL_FLOORS } from './data.js';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, resolve, join, extname } from 'node:path';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { room, player, act, view, tick, CARDS, CLASSES } from './game.js';
 
 const rooms = new Map(), sessions = new Map(), rates = new Map();
 
-// __dirname 안전하게 구하기 (ES Module 대응)
+// ES Module 환경에서 실행 위치 기반으로 절대 경로 생성
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const publicRoot = join(__dirname, 'public');
+const publicRoot = resolve(__dirname, 'public');
 
 const json = (res, status, data) => {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -29,7 +29,6 @@ function joinRoom(r, name, classId) {
   return { token, id: p.id, room: view(r, p.id) };
 }
 
-// 확장자별 Content-Type 매핑
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -140,49 +139,35 @@ export const server = http.createServer(async (req, res) => {
     }
 
     // --- 정적 파일(Assets) 서빙 ---
-    const assets = {
-      '/': 'index.html',
-      '/index.html': 'index.html',
-      '/app.js': 'app.js',
-      '/style.css': 'style.css',
-      '/music.js': 'music.js',
-      '/effects.js': 'effects.js',
-      '/art.js': 'art.js',
-      '/assets/sanctuary.png': 'assets/sanctuary.png',
-      '/assets/classes.png': 'assets/classes.png',
-      '/assets/enemies.png': 'assets/enemies.png',
-      '/audio/afterglow-explore.wav': 'audio/afterglow-explore.wav'
-    };
+    const relPath = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\//, '');
+    const filePath = join(publicRoot, relPath);
 
-    const relativeFilePath = assets[url.pathname];
-    if (!relativeFilePath) {
-      res.writeHead(404);
-      return res.end('Not found');
+    // 보안: public 디렉토리 외부 파일 접근 방지
+    if (!filePath.startsWith(publicRoot)) {
+      res.writeHead(403);
+      return res.end('Forbidden');
     }
 
-    // path.join을 써서 플랫폼(Linux/Windows) 간 파일 경로 충돌 방지
-    const filePath = join(publicRoot, relativeFilePath);
-    const data = await readFile(filePath);
+    try {
+      const data = await readFile(filePath);
+      const ext = extname(filePath);
+      const contentType = MIME_TYPES[ext] || 'application/octet-stream';
 
-    const ext = relativeFilePath.substring(relativeFilePath.lastIndexOf('.'));
-    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-
-    res.writeHead(200, {
-      'Content-Type': contentType,
-      'X-Content-Type-Options': 'nosniff'
-    });
-    res.end(data);
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'X-Content-Type-Options': 'nosniff'
+      });
+      res.end(data);
+    } catch (err) {
+      res.writeHead(404);
+      res.end('File not found');
+    }
 
   } catch (e) {
-    if (e.code === 'ENOENT') {
-      res.writeHead(404);
-      return res.end('File not found');
-    }
     json(res, 400, { error: e instanceof SyntaxError ? '요청 형식을 확인해주세요.' : e.message });
   }
 });
 
-// 주기적 가비지 컬렉터 & 타이머
 setInterval(() => {
   for (const [code, r] of rooms) {
     if (r.players.every(p => Date.now() - p.lastSeen > 3600000)) {
